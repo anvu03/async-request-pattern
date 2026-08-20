@@ -143,35 +143,38 @@ public sealed partial class OutboxPublisher(
 
     private async Task MarkPublishedAsync(Guid id, CancellationToken cancellationToken)
     {
-        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-        var message = await dbContext.OutboxMessages
-            .Include(candidate => candidate.Order)
-            .SingleOrDefaultAsync(
-                candidate => candidate.Id == id && candidate.LeaseOwner == leaseOwner && candidate.PublishedUtc == null,
-                cancellationToken);
-        if (message is null)
+        await ExecuteWithRetryAsync(async (dbContext, attemptCancellationToken) =>
         {
-            await transaction.RollbackAsync(cancellationToken);
-            return;
-        }
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(attemptCancellationToken);
+            var message = await dbContext.OutboxMessages
+                .Include(candidate => candidate.Order)
+                .SingleOrDefaultAsync(
+                    candidate => candidate.Id == id && candidate.LeaseOwner == leaseOwner && candidate.PublishedUtc == null,
+                    attemptCancellationToken);
+            if (message is null)
+            {
+                await transaction.RollbackAsync(attemptCancellationToken);
+                return true;
+            }
 
-        var now = DateTimeOffset.UtcNow;
-        message.PublishedUtc = now;
-        message.LastAttemptUtc = now;
-        message.AttemptCount++;
-        message.LeaseOwner = null;
-        message.LeaseExpiresUtc = null;
-        message.LastFailureCode = null;
-        message.LastFailureMessage = null;
-        if (OrderStatusTransitions.CanTransition(message.Order.Status, OrderStatus.Queued))
-        {
-            message.Order.Status = OrderStatus.Queued;
-            message.Order.UpdatedUtc = now;
-        }
+            var now = DateTimeOffset.UtcNow;
+            message.PublishedUtc = now;
+            message.LastAttemptUtc = now;
+            message.AttemptCount++;
+            message.LeaseOwner = null;
+            message.LeaseExpiresUtc = null;
+            message.LastFailureCode = null;
+            message.LastFailureMessage = null;
+            if (OrderStatusTransitions.CanTransition(message.Order.Status, OrderStatus.Queued))
+            {
+                message.Order.Status = OrderStatus.Queued;
+                message.Order.UpdatedUtc = now;
+            }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+            await dbContext.SaveChangesAsync(attemptCancellationToken);
+            await transaction.CommitAsync(attemptCancellationToken);
+            return true;
+        }, cancellationToken);
     }
 
     private async Task RecordFailureAsync(
@@ -179,45 +182,61 @@ public sealed partial class OutboxPublisher(
         PublishFailure failure,
         CancellationToken cancellationToken)
     {
-        await using var dbContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
-        await using var transaction = await dbContext.Database.BeginTransactionAsync(cancellationToken);
-        var message = await dbContext.OutboxMessages
-            .Include(candidate => candidate.Order)
-            .SingleOrDefaultAsync(
-                candidate => candidate.Id == claim.Id && candidate.LeaseOwner == leaseOwner && candidate.PublishedUtc == null,
-                cancellationToken);
-        if (message is null)
+        await ExecuteWithRetryAsync(async (dbContext, attemptCancellationToken) =>
         {
-            await transaction.RollbackAsync(cancellationToken);
-            return;
-        }
-
-        var now = DateTimeOffset.UtcNow;
-        var attempt = claim.AttemptCount + 1;
-        message.AttemptCount = attempt;
-        message.LastAttemptUtc = now;
-        message.LastFailureCode = failure.Code;
-        message.LastFailureMessage = failure.Message;
-        message.LeaseOwner = null;
-        message.LeaseExpiresUtc = null;
-        if (failure.Permanent)
-        {
-            message.QuarantinedUtc = now;
-            if (OrderStatusTransitions.CanTransition(message.Order.Status, OrderStatus.Failed))
+            await using var transaction = await dbContext.Database.BeginTransactionAsync(attemptCancellationToken);
+            var message = await dbContext.OutboxMessages
+                .Include(candidate => candidate.Order)
+                .SingleOrDefaultAsync(
+                    candidate => candidate.Id == claim.Id && candidate.LeaseOwner == leaseOwner && candidate.PublishedUtc == null,
+                    attemptCancellationToken);
+            if (message is null)
             {
-                message.Order.Status = OrderStatus.Failed;
-                message.Order.UpdatedUtc = now;
-                message.Order.FailureCode = "publish_failed";
-                message.Order.FailureMessage = "Order publication failed.";
+                await transaction.RollbackAsync(attemptCancellationToken);
+                return true;
             }
-        }
-        else
-        {
-            message.NextAttemptUtc = now.Add(OutboxRetry.ComputeDelay(attempt, Random.Shared.NextDouble()));
-        }
 
-        await dbContext.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+            var now = DateTimeOffset.UtcNow;
+            var attempt = claim.AttemptCount + 1;
+            message.AttemptCount = attempt;
+            message.LastAttemptUtc = now;
+            message.LastFailureCode = failure.Code;
+            message.LastFailureMessage = failure.Message;
+            message.LeaseOwner = null;
+            message.LeaseExpiresUtc = null;
+            if (failure.Permanent)
+            {
+                message.QuarantinedUtc = now;
+                if (OrderStatusTransitions.CanTransition(message.Order.Status, OrderStatus.Failed))
+                {
+                    message.Order.Status = OrderStatus.Failed;
+                    message.Order.UpdatedUtc = now;
+                    message.Order.FailureCode = "publish_failed";
+                    message.Order.FailureMessage = "Order publication failed.";
+                }
+            }
+            else
+            {
+                message.NextAttemptUtc = now.Add(OutboxRetry.ComputeDelay(attempt, Random.Shared.NextDouble()));
+            }
+
+            await dbContext.SaveChangesAsync(attemptCancellationToken);
+            await transaction.CommitAsync(attemptCancellationToken);
+            return true;
+        }, cancellationToken);
+    }
+
+    private async Task<TResult> ExecuteWithRetryAsync<TResult>(
+        Func<OrdersDbContext, CancellationToken, Task<TResult>> operation,
+        CancellationToken cancellationToken)
+    {
+        await using var strategyContext = await dbContextFactory.CreateDbContextAsync(cancellationToken);
+        var strategy = strategyContext.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync(async attemptCancellationToken =>
+        {
+            await using var dbContext = await dbContextFactory.CreateDbContextAsync(attemptCancellationToken);
+            return await operation(dbContext, attemptCancellationToken);
+        }, cancellationToken);
     }
 
     private static PublishFailure Classify(Exception exception) => exception switch
