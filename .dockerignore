@@ -1,0 +1,13 @@
+.git
+.gitignore
+.env
+.env.*
+**/bin
+**/obj
+database
+docs
+infra
+scripts
+tests
+compose.yaml
+README*

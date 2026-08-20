@@ -1,0 +1,119 @@
+name: azure-bus-service
+
+services:
+  sql:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    platform: linux/amd64
+    environment:
+      ACCEPT_EULA: "${ACCEPT_EULA:-Y}"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-LocalOnly_SA_2026!}"
+    ports:
+      - "127.0.0.1:${SQL_PORT:-1433}:1433"
+    volumes:
+      - sql-data:/var/opt/mssql
+      - ./database:/workspace/database:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -C -Q "SELECT 1" -b -o /dev/null
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  emulator:
+    image: mcr.microsoft.com/azure-messaging/servicebus-emulator:2.0.1
+    environment:
+      ACCEPT_EULA: "${ACCEPT_EULA:-Y}"
+      MSSQL_SA_PASSWORD: "${MSSQL_SA_PASSWORD:-LocalOnly_SA_2026!}"
+      SQL_SERVER: sql
+      SQL_WAIT_INTERVAL: "${SQL_WAIT_INTERVAL:-5}"
+      EMULATOR_HTTP_PORT: "5300"
+    ports:
+      - "127.0.0.1:${SERVICE_BUS_AMQP_PORT:-5672}:5672"
+      - "127.0.0.1:${SERVICE_BUS_MANAGEMENT_PORT:-5300}:5300"
+    volumes:
+      - ./infra/servicebus/Config.json:/ServiceBus_Emulator/ConfigFiles/Config.json:ro
+    depends_on:
+      sql:
+        condition: service_healthy
+
+  emulator-health:
+    image: curlimages/curl:8.15.0
+    command:
+      - --fail
+      - --silent
+      - --show-error
+      - --retry
+      - "90"
+      - --retry-delay
+      - "2"
+      - --retry-connrefused
+      - --max-time
+      - "2"
+      - http://emulator:5300/health
+    depends_on:
+      emulator:
+        condition: service_started
+    restart: "no"
+
+  api:
+    profiles:
+      - apps
+    build:
+      context: .
+      dockerfile: src/AzureBusService.Api/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_HTTP_PORTS: "8080"
+      ConnectionStrings__Orders: "${ORDERS_DB_COMPOSE_CONNECTION_STRING:-Server=sql,1433;Database=OrdersDb;User ID=orders_app_local;Password=LocalOnly_OrdersDb_2026!;Encrypt=True;TrustServerCertificate=True}"
+      Authentication__Enabled: "false"
+      Authentication__AllowAnonymousLocal: "true"
+      ServiceBus__Mode: Emulator
+      ServiceBus__ConnectionString: "${SERVICE_BUS_COMPOSE_CONNECTION_STRING:-Endpoint=sb://emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;}"
+      ServiceBus__QueueName: orders
+    ports:
+      - "127.0.0.1:${API_PORT:-5080}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      sql:
+        condition: service_healthy
+      emulator-health:
+        condition: service_completed_successfully
+
+  worker:
+    profiles:
+      - apps
+    build:
+      context: .
+      dockerfile: src/AzureBusService.Worker/Dockerfile
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_HTTP_PORTS: "8080"
+      ConnectionStrings__Orders: "${ORDERS_DB_COMPOSE_CONNECTION_STRING:-Server=sql,1433;Database=OrdersDb;User ID=orders_app_local;Password=LocalOnly_OrdersDb_2026!;Encrypt=True;TrustServerCertificate=True}"
+      ServiceBus__Mode: Emulator
+      ServiceBus__ConnectionString: "${SERVICE_BUS_COMPOSE_CONNECTION_STRING:-Endpoint=sb://emulator;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=SAS_KEY_VALUE;UseDevelopmentEmulator=true;}"
+      ServiceBus__QueueName: orders
+    ports:
+      - "127.0.0.1:${WORKER_PORT:-5081}:8080"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      sql:
+        condition: service_healthy
+      emulator-health:
+        condition: service_completed_successfully
+
+volumes:
+  sql-data:
