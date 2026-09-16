@@ -1,6 +1,6 @@
 # Azure Bus Service
 
-See the [HTTP API contract](docs/api-contract.md) for client-facing behavior, the [system architecture](docs/architecture.md) for design and reliability boundaries, and the [infrastructure guide](docs/infrastructure.md) for topology, configuration, storage, startup, and troubleshooting.
+See the [HTTP API contract](docs/api-contract.md) for client-facing behavior, the [system architecture](docs/architecture.md) for system boundaries, the [messaging reliability guide](docs/messaging-reliability.md) for Outbox, Service Bus, Inbox, retry, and dead-letter behavior, and the [infrastructure guide](docs/infrastructure.md) for topology, configuration, storage, startup, and troubleshooting.
 
 .NET 10 order API and queue worker demonstrating durable asynchronous processing with SQL Server, a transactional outbox/inbox, and Azure Service Bus. Docker Compose provides local SQL Server 2022, Microsoft Azure Service Bus Emulator 2.0.1, and optional API/worker containers; applications can instead run directly on the host.
 

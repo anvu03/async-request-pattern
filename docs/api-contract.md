@@ -607,6 +607,7 @@ Only `v1` exists today; these rules do not imply a planned `v2`.
 ## Related documentation
 
 - [System architecture](architecture.md)
+- [Messaging reliability](messaging-reliability.md)
 - [Infrastructure guide](infrastructure.md)
 - [Foundation specification](azure-service-bus-order-processing-foundation-spec.md)
 - [Repository README](../README.md)

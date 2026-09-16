@@ -595,6 +595,7 @@ replaces them:
 ## Related documentation
 
 - [HTTP API contract](api-contract.md)
+- [Messaging reliability](messaging-reliability.md)
 - [Infrastructure guide](infrastructure.md)
 - [Foundation specification](azure-service-bus-order-processing-foundation-spec.md)
 - [Repository README](../README.md)
